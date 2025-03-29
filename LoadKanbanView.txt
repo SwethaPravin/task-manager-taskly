@@ -1,0 +1,142 @@
+import React, { useState, useEffect } from 'react';
+import { View, Text, Dimensions } from 'react-native';
+import {
+  FlatList,
+  GestureHandlerRootView,
+  PanGestureHandler,
+} from 'react-native-gesture-handler';
+import { useSQLiteContext } from 'expo-sqlite';
+import styles from '../../styles/styles';
+import { getAllTasks, updateTaskStatus } from '../database/TaskDatabase';
+import { getStatusText } from '../utils/utils';
+import Animated, {
+  useSharedValue,
+  useAnimatedGestureHandler,
+  useAnimatedStyle,
+  withSpring,
+  runOnJS,
+} from 'react-native-reanimated';
+
+const LoadKanbanView = (props) => {
+  const { navigation } = props;
+  const [tasks, setTasks] = useState([]);
+  const database = useSQLiteContext();
+
+  const { width } = Dimensions.get('window');
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', async () => {
+      const result = await getAllTasks(database);
+      setTasks(result);
+    });
+
+    return unsubscribe;
+  }, [navigation, database]);
+
+  useEffect(() => {
+    async function setup() {
+      const result = await getAllTasks(database);
+      setTasks(result);
+    }
+    setup();
+  }, [database, setTasks]);
+
+  // Group tasks by status for Kanban
+  const groupTasksByStatus = () => {
+    const statuses = ['Pending', 'In Progress', 'Completed']; // Match your seeded statuses
+    const grouped = statuses.map((status) => ({
+      status,
+      tasks: tasks.filter((task) => getStatusText(task.statusId) === status),
+    }));
+    return grouped;
+  };
+
+  const DraggableTask = ({ task, onDrop }) => {
+    const [isDragging, setIsDragging] = useState(false); 
+    const translateX = useSharedValue(0);
+    const translateY = useSharedValue(0);
+    const handleDrop = (taskId, newStatusId) => {
+      updateTaskStatus(database, taskId, newStatusId);
+    };
+
+    const gestureHandler = useAnimatedGestureHandler({
+      onStart: (_, ctx) => {
+        runOnJS(setIsDragging)(true);
+        ctx.startX = translateX.value;
+        ctx.startY = translateY.value;
+      },
+      onActive: (event, ctx) => {
+        translateX.value = ctx.startX + event.translationX;
+        translateY.value = ctx.startY + event.translationY;
+      },
+      onEnd: async () => {
+        const columnWidth = width * 0.8;
+        const newColumnIndex = Math.floor(
+          (translateX.value + columnWidth / 2) / columnWidth
+        );
+        if (newColumnIndex >= 0 && newColumnIndex < 3) {
+          const newStatusId = newColumnIndex + 1;
+          console.log('Dropped task:', task.id, 'to status:', newStatusId);
+          runOnJS(handleDrop)(task.id, newStatusId); // Use wrapper function
+        }
+        translateX.value = withSpring(0);
+        translateY.value = withSpring(0);
+        runOnJS(setIsDragging)(false);
+      },
+    });
+
+    const animatedStyle = useAnimatedStyle(() => ({
+      transform: [
+        { translateX: translateX.value },
+        { translateY: translateY.value },
+      ],
+      // position: isDragging ? 'absolute' : 'relative', 
+      zIndex: isDragging ? 9999 : 1, elevation: isDragging ? 9999 : 1,
+    }));
+    // const animatedStyle = useAnimatedStyle(() => ({ transform: [ { translateX: translateX.value }, { translateY: translateY.value }, ], position: 'absolute', zIndex: 100, elevation: 100, }));
+    return (
+      <PanGestureHandler onGestureEvent={gestureHandler}>
+        <Animated.View
+          style={[styles.taskCard, animatedStyle]}
+          onTouchEnd={() => navigation.navigate('Edit Task', { taskId: task.id })}
+        >
+          <Text style={styles.taskTitle}>{task.name}</Text>
+          <Text>
+            {task.priorityName} - Due: {task.dueDate}
+          </Text>
+          {task.description ? <Text>{task.description}</Text> : null}
+        </Animated.View>
+      </PanGestureHandler>
+    );
+  };
+
+  const renderKanbanColumn = ({ item }) => (
+    <View style={styles.column}>
+      <Text style={styles.columnHeader}>
+        {getStatusText(item.statusId)} ({item.tasks.length})
+      </Text>
+      <FlatList
+        data={item.tasks}
+        keyExtractor={(task) => task.id.toString()}
+        renderItem={({ item }) => (
+          <DraggableTask task={item} onDrop={getAllTasks(database)} />
+        )}
+        style={styles.taskList}
+      />
+    </View>
+  );
+
+  return (
+    <GestureHandlerRootView style={styles.kanbanContainer}>
+      <FlatList
+        data={groupTasksByStatus()}
+        keyExtractor={(item) => item.status}
+        renderItem={renderKanbanColumn}
+        horizontal
+        showsHorizontalScrollIndicator={true}
+        style={styles.kanbanContainer}
+      />
+    </GestureHandlerRootView>
+  );
+};
+
+export default LoadKanbanView;
